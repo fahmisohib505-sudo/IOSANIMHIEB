@@ -11,17 +11,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 import java.lang.reflect.Method;
 
 /**
- * IOS27Anim v4 - Peluncur XOS (com.transsion.launcher3).
- * Hanya mengubah DINAMIKA spring launcher (semua lapisan tetap sinkron).
- *   BUKA : kekakuan 1100, redaman 1.10
- *   TUTUP: kekakuan 280,  redaman 0.87
- * Root: setprop debug.ios27.open_k / open_z / close_k / close_z / on
+ * IOS27Anim v5 - Peluncur XOS (com.transsion.launcher3).
+ * 1) Menyalakan animasi SKEW/vertex-deformation bawaan launcher.
+ * 2) Spring buka/tutup disetel dari ukuran video iOS.
+ * Root: setprop debug.ios27.skew 0|1 ; debug.ios27.on 0|1 ; open_k/open_z/close_k/close_z
  * Log: su -c "logcat -d -s IOS27"
  */
 public class Hook implements IXposedHookLoadPackage {
     private static final String PKG = "com.transsion.launcher3";
     private static final String TAG = "IOS27: ";
-    private static final String CLS = "com.android.launcher3.animation.TrRectFSpringAnim";
 
     private static String prop(String k, String def) {
         try {
@@ -38,13 +36,37 @@ public class Hook implements IXposedHookLoadPackage {
         Log.i("IOS27", m);
     }
 
+    private static void forceTrue(final ClassLoader cl, String cls, final String method) {
+        try {
+            Class<?> c = XposedHelpers.findClass(cls, cl);
+            XposedBridge.hookAllMethods(c, method, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    try {
+                        if (!"1".equals(prop("debug.ios27.skew", "1"))) return;
+                        Object r = p.getResult();
+                        if (r instanceof Boolean && !((Boolean) r)) {
+                            log(method + " asli=false -> true");
+                            p.setResult(Boolean.TRUE);
+                        }
+                    } catch (Throwable e) { log(method + ": " + e); }
+                }
+            });
+            log("hook " + cls + "." + method + " OK");
+        } catch (Throwable t) { log("gagal hook " + cls + "." + method + ": " + t); }
+    }
+
     @Override
     public void handleLoadPackage(LoadPackageParam lp) {
         if (!PKG.equals(lp.packageName)) return;
         log("dimuat di " + lp.packageName);
-        try {
-            Class<?> c = XposedHelpers.findClass(CLS, lp.classLoader);
+        ClassLoader cl = lp.classLoader;
 
+        forceTrue(cl, "com.android.launcher3.animation.WindowAnimUtil", "skewMethodEnable");
+        forceTrue(cl, "com.android.launcher3.util.Partner", "shouldUseSkewAnim");
+        forceTrue(cl, "com.android.quickstep.LauncherSwipeHandlerV2", "shouldUseSkewSwipeHomeAnimation");
+
+        try {
+            Class<?> c = XposedHelpers.findClass("com.android.launcher3.animation.TrRectFSpringAnim", cl);
             XposedBridge.hookAllMethods(c, "setSpringParams", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     try {
@@ -52,7 +74,7 @@ public class Hook implements IXposedHookLoadPackage {
                         float a = (Float) p.args[1], b = (Float) p.args[2];
                         boolean open = true;
                         try { open = (Boolean) XposedHelpers.callMethod(p.thisObject, "getIsOpenAPP"); } catch (Throwable ignored) {}
-                        log((open ? "OPEN" : "CLOSE") + " setSpringParams prop=" + p.args[0] + " a=" + a + " b=" + b);
+                        log((open ? "OPEN" : "CLOSE") + " setSpringParams a=" + a + " b=" + b);
                         if (!"1".equals(prop("debug.ios27.on", "1"))) return;
                         float k = open ? fprop("debug.ios27.open_k", 1100f) : fprop("debug.ios27.close_k", 280f);
                         float z = open ? fprop("debug.ios27.open_z", 1.10f) : fprop("debug.ios27.close_z", 0.87f);
@@ -61,13 +83,14 @@ public class Hook implements IXposedHookLoadPackage {
                     } catch (Throwable e) { log("setSpringParams: " + e); }
                 }
             });
-
-            XposedBridge.hookAllMethods(c, "setSpringForceConfig", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    log("setSpringForceConfig " + (p.args.length > 0 ? p.args[0] : ""));
-                }
-            });
             log("hook TrRectFSpringAnim OK");
-        } catch (Throwable t) { log("gagal hook: " + t); }
+        } catch (Throwable t) { log("gagal hook TrRectFSpringAnim: " + t); }
+
+        try {
+            Class<?> v = XposedHelpers.findClass("com.android.launcher3.animation.TrVertexDeformationAnim", cl);
+            XposedBridge.hookAllMethods(v, "start", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) { log("TrVertexDeformationAnim.start"); }
+            });
+        } catch (Throwable t) { log("vertex: " + t); }
     }
 }
