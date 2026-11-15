@@ -1,5 +1,7 @@
 package com.fahmi.ios27anim;
 
+import android.content.res.Resources;
+import android.graphics.Matrix;
 import android.util.Log;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -11,15 +13,17 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 import java.lang.reflect.Method;
 
 /**
- * IOS27Anim v5 - Peluncur XOS (com.transsion.launcher3).
- * 1) Menyalakan animasi SKEW/vertex-deformation bawaan launcher.
- * 2) Spring buka/tutup disetel dari ukuran video iOS.
- * Root: setprop debug.ios27.skew 0|1 ; debug.ios27.on 0|1 ; open_k/open_z/close_k/close_z
+ * IOS27Anim v6 - Peluncur XOS (com.transsion.launcher3).
+ * 1) Spring buka/tutup dari video iOS (v4): BUKA k=1100 z=1.10 ; TUTUP k=280 z=0.87
+ * 2) Kemiringan ala iOS: shear pada matriks jendela selama animasi.
+ * Root: setprop debug.ios27.tilt 0.16 (0=mati) ; tiltdir 1|-1 ; on 0|1
  * Log: su -c "logcat -d -s IOS27"
  */
 public class Hook implements IXposedHookLoadPackage {
     private static final String PKG = "com.transsion.launcher3";
     private static final String TAG = "IOS27: ";
+
+    private static volatile long ACTIVE_UNTIL = 0L;
 
     private static String prop(String k, String def) {
         try {
@@ -36,37 +40,15 @@ public class Hook implements IXposedHookLoadPackage {
         Log.i("IOS27", m);
     }
 
-    private static void forceTrue(final ClassLoader cl, String cls, final String method) {
-        try {
-            Class<?> c = XposedHelpers.findClass(cls, cl);
-            XposedBridge.hookAllMethods(c, method, new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam p) {
-                    try {
-                        if (!"1".equals(prop("debug.ios27.skew", "1"))) return;
-                        Object r = p.getResult();
-                        if (r instanceof Boolean && !((Boolean) r)) {
-                            log(method + " asli=false -> true");
-                            p.setResult(Boolean.TRUE);
-                        }
-                    } catch (Throwable e) { log(method + ": " + e); }
-                }
-            });
-            log("hook " + cls + "." + method + " OK");
-        } catch (Throwable t) { log("gagal hook " + cls + "." + method + ": " + t); }
-    }
-
     @Override
     public void handleLoadPackage(LoadPackageParam lp) {
         if (!PKG.equals(lp.packageName)) return;
         log("dimuat di " + lp.packageName);
         ClassLoader cl = lp.classLoader;
 
-        forceTrue(cl, "com.android.launcher3.animation.WindowAnimUtil", "skewMethodEnable");
-        forceTrue(cl, "com.android.launcher3.util.Partner", "shouldUseSkewAnim");
-        forceTrue(cl, "com.android.quickstep.LauncherSwipeHandlerV2", "shouldUseSkewSwipeHomeAnimation");
-
         try {
             Class<?> c = XposedHelpers.findClass("com.android.launcher3.animation.TrRectFSpringAnim", cl);
+
             XposedBridge.hookAllMethods(c, "setSpringParams", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     try {
@@ -83,14 +65,43 @@ public class Hook implements IXposedHookLoadPackage {
                     } catch (Throwable e) { log("setSpringParams: " + e); }
                 }
             });
+
+            XposedBridge.hookAllMethods(c, "start", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    ACTIVE_UNTIL = android.os.SystemClock.uptimeMillis() + 900L;
+                }
+            });
             log("hook TrRectFSpringAnim OK");
         } catch (Throwable t) { log("gagal hook TrRectFSpringAnim: " + t); }
 
         try {
-            Class<?> v = XposedHelpers.findClass("com.android.launcher3.animation.TrVertexDeformationAnim", cl);
-            XposedBridge.hookAllMethods(v, "start", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) { log("TrVertexDeformationAnim.start"); }
+            Class<?> sp = XposedHelpers.findClass("com.android.quickstep.util.SurfaceTransaction$SurfaceProperties", cl);
+            XposedBridge.hookAllMethods(sp, "setMatrix", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    try {
+                        if (p.args.length < 1 || !(p.args[0] instanceof Matrix)) return;
+                        if (android.os.SystemClock.uptimeMillis() > ACTIVE_UNTIL) return;
+                        float tilt = fprop("debug.ios27.tilt", 0.16f);
+                        if (tilt <= 0f) return;
+                        Matrix m = (Matrix) p.args[0];
+                        float[] v = new float[9];
+                        m.getValues(v);
+                        float sx = v[Matrix.MSCALE_X];
+                        if (sx >= 0.995f || sx <= 0.02f) return;
+                        float sw = Resources.getSystem().getDisplayMetrics().widthPixels;
+                        float sh = Resources.getSystem().getDisplayMetrics().heightPixels;
+                        float sy = v[Matrix.MSCALE_Y];
+                        float cx = v[Matrix.MTRANS_X] + sx * sw / 2f;
+                        float cy = v[Matrix.MTRANS_Y] + sy * sh / 2f;
+                        float dir = fprop("debug.ios27.tiltdir", 1f) >= 0 ? 1f : -1f;
+                        float kx = dir * tilt * (1f - sx);
+                        Matrix m2 = new Matrix(m);
+                        m2.postSkew(kx, 0f, cx, cy);
+                        p.args[0] = m2;
+                    } catch (Throwable e) { log("setMatrix: " + e); }
+                }
             });
-        } catch (Throwable t) { log("vertex: " + t); }
+            log("hook SurfaceProperties.setMatrix OK");
+        } catch (Throwable t) { log("gagal hook setMatrix: " + t); }
     }
 }
